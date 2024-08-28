@@ -1,0 +1,151 @@
+### CI/CD ###
+#############
+ 
+ ## Prerequisites
+1. Jenkins Server: Ensure Jenkins is installed and accessible.
+
+2. Following plugins are installed:
+
+Git Plugin: For pulling code from a Git repository.
+SSH Agent Plugin: For SSH-based deployment to the GCE instance.
+Pipeline Plugin: For creating pipeline jobs.
+Monitoring Plugin (Optional): For monitoring the Jenkins jobs and health checks.
+3. Docker installation on the GCE instance.
+# jankins file #
+pipeline {
+    agent any
+
+    environment {
+        // Define environment variables if needed
+        INSTANCE_IP = 'my-instance-ip'
+        SSH_CREDENTIALS_ID = 'jenkins-ssh-key'
+    }
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git branch: 'main', url: 'https://github.com/my-repo/my-app.git'
+            }
+        }
+        stage('Build') {
+            steps {
+                sh 'docker build -t my-app .'
+            }
+        }
+        stage('Test') {
+            steps {
+                script {
+                    def result = sh(script: 'docker run my-app npm test', returnStatus: true)
+                    if (result != 0) {
+                        error 'Tests failed. Stopping the pipeline.'
+                    }
+                }
+            }
+        }
+        stage('Install Docker on GCE') {
+            steps {
+                sshagent([SSH_CREDENTIALS_ID]) {
+                    sh '''
+                    ssh -o StrictHostKeyChecking=no user@${INSTANCE_IP} << EOF
+                    if ! [ -x "$(command -v docker)" ]; then
+                      sudo apt-get update
+                      sudo apt-get install -y docker.io
+                      sudo systemctl start docker
+                      sudo systemctl enable docker
+                    fi
+                    EOF
+                    '''
+                }
+            }
+        }
+        stage('Deploy Application') {
+            steps {
+                sshagent([SSH_CREDENTIALS_ID]) {
+                    // Transfer the Docker image to the GCE instance
+                    sh 'docker save my-app -o my-app.tar.gz'
+                    sh 'scp -o StrictHostKeyChecking=no my-app.tar.gz user@${INSTANCE_IP}:/home/user/'
+
+                    // Deploy the application on the GCE instance
+                    sh '''
+                    ssh -o StrictHostKeyChecking=no user@${INSTANCE_IP} << EOF
+                    docker load -i /home/user/my-app.tar.gz
+                    docker run -d -p 80:80 my-app
+                    EOF
+                    '''
+                }
+            }
+        }
+        stage('Monitoring and Notifications') {
+            steps {
+                // Optional: we can integrate monitoring tools here (e.g., Prometheus, Grafana)
+                echo 'Monitoring the application deployment...'
+
+                // Example: Send notification upon successful deployment
+                // Send notifications via email, Slack, etc.
+                // mail to: 'my-email@example.com',
+                //      subject: "Deployment Successful",
+                //      body: "The deployment of my-app was successful."
+
+                // we can also set up health checks to ensure the application is running correctly
+                sh '''
+                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${INSTANCE_IP})
+                if [ "$RESPONSE" != "200" ]; then
+                    error 'Health check failed! Application is not responding with HTTP 200.'
+                fi
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs() // Clean up the workspace
+        }
+        success {
+            echo 'Pipeline completed successfully!'
+            // You can send success notifications here
+        }
+        failure {
+            echo 'Pipeline failed!'
+            // You can send failure notifications here
+        }
+    }
+}
+#################################################
+
+Summary of the jenkins CI/CD Flow:
+Pull the Code: Jenkins pulls the latest code (including the Dockerfile) from GitHub.
+Build the Image: The Docker image is built on the Jenkins server using the Dockerfile.
+Create Tarball: The Docker image is saved as a tarball for easy transfer.
+Transfer and Deploy: The tarball is transferred to the GCE instance, where the image is loaded and run as a container.
+Monitoring and Updates: The pipeline monitors the deployment, and Jenkins can poll GitHub to automatically redeploy if there are any new changes or new commit in the repository.
+
+##################################################
+Monitoring and Logging
+###################################################
+
+To achieve monitoring and logging with Google Cloud Monitoring and set up an alert for CPU usage exceeding 80%, follow these steps:
+1.  Integrate Google Cloud Monitoring by ensuring Google Cloud Monitoring and Google Cloud Logging APIs are enabled 
+2. Install the Monitoring Agent: Monitoring agent collects system metrics like CPU, memory, and disk usage.
+SSH into your GCE instance and install the agent using the following commands:
+curl -sSO https://dl.google.com/cloudagents/add-monitoring-agent-repo.sh
+sudo bash add-monitoring-agent-repo.sh
+sudo apt-get update
+sudo apt-get install stackdriver-agent
+sudo service stackdriver-agent start
+sudo service stackdriver-agent status
+
+3. Set Up Basic Monitoring
+In the GCP Console, navigate to Monitoring from the main menu.
+Go to Metrics Explorer to view metrics like CPU utilization, memory usage, and disk usage for your GCE instance.
+You can create custom dashboards to visualize these metrics:
+In Monitoring > Dashboards, click on Create Dashboard.
+Add charts to monitor CPU, memory, and disk usage by selecting the appropriate metrics from the available options.
+4. Set Up Alerts for CPU Usage
+In the Monitoring section of the GCP Console, go to Alerting.
+Click on Create Policy.
+Configure the Alert:
+Select the Metric:
+Under Conditions, click on Add Condition.
+Choose Metric: Compute Engine VM instance > CPU utilization.
+Set the threshold to trigger the alert when CPU utilization exceeds 80%.
