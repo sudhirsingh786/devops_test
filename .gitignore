@@ -1,2 +1,4 @@
 .jar
 .tf*
+*.exe
+!example.exe
